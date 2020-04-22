@@ -3,6 +3,7 @@ import logging
 
 import aioredis
 from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
 
@@ -12,6 +13,11 @@ from websockets.exceptions import ConnectionClosed
 #
 logger = logging.getLogger("main")
 app = FastAPI()
+
+# Allow CORS for requests coming from any domain
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+)
 
 
 @app.get("/echo")

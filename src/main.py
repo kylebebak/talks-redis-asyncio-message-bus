@@ -36,67 +36,76 @@ Message = Tuple[bytes, bytes, Dict[bytes, bytes]]
 
 
 async def read_from_stream(
-    redis: aioredis.Redis, stream: str, latest_id: str = None, last_n: int = None
+    redis: aioredis.Redis, stream: str, latest_id: str = None, past_ms: int = None, last_n: int = None
 ) -> List[Message]:
     timeout_ms = 60 * 1000
 
-    # read everything after latest_id with latest_ids arg
+    # Blocking read for every message added after latest_id, using XREAD
     if latest_id is not None:
         return await redis.xread([stream], latest_ids=[latest_id], timeout=timeout_ms)
 
-    # read last_n messages with xrevrange and count arg
+    # Blocking read for every message added after current timestamp minus past_ms, using XREAD
+    if past_ms is not None:
+        server_time_s = await redis.time()
+        latest_id = str(round(server_time_s * 1000 - past_ms))
+        return await redis.xread([stream], latest_ids=[latest_id], timeout=timeout_ms)
+
+    # Non-blocking read for last_n messages, using XREVRANGE
     if last_n is not None:
         messages = await redis.xrevrange(stream, count=last_n)
         return list(reversed([(stream.encode("utf-8"), *m) for m in messages]))
 
-    # default case, read all messages going forward with xread, [stream] and timeout
+    # Default case, blocking read for all messages added after calling XREAD
     return await redis.xread([stream], timeout=timeout_ms)
 
 
 @app.websocket("/stream/{stream}")
 async def proxy_stream(
-    ws: WebSocket, stream: str, latest_id: str = None, last_n: int = None, max_frequency: float = None
+    ws: WebSocket,
+    stream: str,
+    latest_id: str = None,
+    past_ms: int = None,
+    last_n: int = None,
+    max_frequency: float = None,
 ):
     await ws.accept()
-    # create redis connection with aioredis.create_redis
+    # Create redis connection with aioredis.create_redis
     redis = await aioredis.create_redis("redis://127.0.0.1:6379")
 
-    # loop for as long as client is connected and our reads don't time out, sending messages to client over websocket
+    # Loop for as long as client is connected and our reads don't time out, sending messages to client over websocket
     while True:
-        # declare messages as a list of Message
-        messages: List[Message] = []
-
-        # handle max_frequency using latest_id
+        # Limit max_frequency of messages read by constructing our own latest_id
         to_read_id = latest_id
         if max_frequency is not None and latest_id is not None:
             ms_to_wait = 1000 / (max_frequency or 1)
             ts = int(latest_id.split("-")[0])
             to_read_id = f"{ts + max(0, round(ms_to_wait))}"
 
-        # read_from_stream, and handle exception raised by this function
+        # Call read_from_stream, and return if it raises an exception
+        messages: List[Message]
         try:
-            messages = await read_from_stream(redis, stream, to_read_id, last_n)
+            messages = await read_from_stream(redis, stream, to_read_id, past_ms, last_n)
         except Exception as e:
             logger.info(f"read timed out for stream {stream}, {e}")
             return
 
-        # if we have no new messages, note that read timed out and return
+        # If we have no new messages, note that read timed out and return
         if len(messages) == 0:
             logger.info(f"no new messages, read timed out for stream {stream}")
             return
 
-        # if we have max_frequency, assign only most recent message to messages
+        # If we have max_frequency, assign only most recent message to messages
         if max_frequency is not None:
             messages = messages[-1:]
 
-        # prepare messages
+        # Prepare messages (message_id and JSON-serializable payload dict)
         prepared_messages = []
         for msg in messages:
             latest_id = msg[1].decode("utf-8")
             payload = {k.decode("utf-8"): v.decode("utf-8") for k, v in msg[2].items()}
             prepared_messages.append({"message_id": latest_id, "payload": payload})
 
-        # send messages to client, handling (ConnectionClosed, WebSocketDisconnect) in case client has disconnected
+        # Send messages to client, handling (ConnectionClosed, WebSocketDisconnect) in case client has disconnected
         try:
             await ws.send_json(prepared_messages)
         except (ConnectionClosed, WebSocketDisconnect):

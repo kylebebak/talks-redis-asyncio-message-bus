@@ -1,6 +1,6 @@
 # Build a Message Bus with Redis Streams and FastAPI
 
-Readme [also in Spanish here](./readme_spanish.md).
+Readme [also in Spanish here](./readme_spanish.md). Presentation given at [RedisConf 2020](https://www.youtube.com/watch?v=LHOjW42-A40).
 
 ## How to run the code in this repo
 
